@@ -147,6 +147,7 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
         .Case("track-compiles", SourceKitRequest::EnableCompileNotifications)
         .Case("collect-type", SourceKitRequest::CollectExpressionType)
         .Case("collect-var-type", SourceKitRequest::CollectVariableType)
+        .Case("collect-decl-usr", SourceKitRequest::CollectDeclarationUSR)
         .Case("global-config", SourceKitRequest::GlobalConfiguration)
         .Case("dependency-updated", SourceKitRequest::DependencyUpdated)
         .Case("diags", SourceKitRequest::Diagnostics)
@@ -204,6 +205,7 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
                      << "- stats\n"
                      << "- track-compiles\n"
                      << "- collect-type\n"
+                     << "- collect-decl-usr\n"
                      << "- global-config\n"
                      << "- dependency-updated\n"
                      << "- syntactic-expandmacro\n"

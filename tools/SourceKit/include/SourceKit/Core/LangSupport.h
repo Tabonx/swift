@@ -166,6 +166,22 @@ struct VariableTypesInFile {
   StringRef TypeBuffer;
 };
 
+struct DeclarationUSR {
+  /// The declaration identifier's offset in the file.
+  unsigned Offset;
+  /// The declaration identifier's length.
+  unsigned Length;
+  /// The declaration kind.
+  UIdent Kind;
+  /// The declaration's USR.
+  std::string USR;
+};
+
+struct DeclarationUSRsInFile {
+  /// The declarations found in the file.
+  std::vector<DeclarationUSR> Results;
+};
+
 class CodeCompletionConsumer {
   virtual void anchor();
 
@@ -1274,6 +1290,17 @@ public:
       bool CancelOnSubsequentRequest,
       SourceKitCancellationToken CancellationToken,
       std::function<void(const RequestResult<VariableTypesInFile> &)>
+          Receiver) = 0;
+
+  /// Collects the USRs and kinds of declarations for a range defined by
+  /// `Offset` and `Length` in the source file. If `Offset` or `Length` are
+  /// empty, declarations for the entire document are collected.
+  virtual void collectDeclarationUSRs(
+      StringRef FilePath, ArrayRef<const char *> Args,
+      std::optional<unsigned> Offset, std::optional<unsigned> Length,
+      bool CancelOnSubsequentRequest,
+      SourceKitCancellationToken CancellationToken,
+      std::function<void(const RequestResult<DeclarationUSRsInFile> &)>
           Receiver) = 0;
 
   virtual void getDocInfo(llvm::MemoryBuffer *InputBuf,

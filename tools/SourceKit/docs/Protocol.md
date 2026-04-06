@@ -22,6 +22,7 @@ The protocol is documented in the following format:
 | -------------:|:------------|
 | [Code Completion](#code-completion) | source.request.codecomplete |
 | [Cursor Info](#cursor-info) | source.request.cursorinfo |
+| [Declaration USR](#declaration-usr) | source.request.declaration.usr |
 | [Demangling](#demangling) | source.request.demangle |
 | [Mangling](#simple-class-mangling) | source.request.mangle_simple_class |
 | [Documentation](#documentation) | source.request.docinfo |
@@ -831,6 +832,48 @@ var-type-info ::=
 
 ```
 $ sourcekitd-test -req=collect-var-type /path/to/file.swift -- /path/to/file.swift
+```
+
+## Declaration USR
+
+This request collects declaration offsets, lengths, kinds, and USRs in a Swift
+source file after type checking. It is intended to batch the declaration data
+that would otherwise require many individual cursor-info requests.
+
+### Request
+
+```
+{
+    <key.request>:      (UID)     <source.request.declaration.usr>,
+    <key.filepath>:     (string)  // Absolute path to the file.
+    <key.compilerargs>: [string*] // Array of zero or more strings for the compiler arguments.
+                                  // These must include the file path.
+    [opt] <key.offset>: (int64)   // Offset of the requested range. Defaults to zero.
+    [opt] <key.length>: (int64)   // Length of the requested range. Defaults to the entire file.
+}
+```
+
+### Response
+```
+{
+    <key.declarations>: (array) [declaration-info*] // A list of declarations in the file
+}
+```
+
+```
+declaration-info ::=
+{
+    <key.kind>:   (UID)    // Kind of the declaration
+    <key.offset>: (int64)  // Offset of the declaration identifier in the source file
+    <key.length>: (int64)  // Length of the declaration identifier in the source file
+    <key.usr>:    (string) // USR string for the declaration
+}
+```
+
+### Testing
+
+```
+$ sourcekitd-test -req=collect-decl-usr /path/to/file.swift -- /path/to/file.swift
 ```
 
 # UIDs

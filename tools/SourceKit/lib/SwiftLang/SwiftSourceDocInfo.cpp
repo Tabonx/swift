@@ -25,6 +25,7 @@
 #include "swift/AST/LookupKinds.h"
 #include "swift/AST/ModuleNameLookup.h"
 #include "swift/AST/NameLookup.h"
+#include "swift/AST/USRGeneration.h"
 #include "swift/AST/SwiftNameTranslation.h"
 #include "swift/Basic/Assertions.h"
 #include "swift/Basic/SourceManager.h"
@@ -3044,6 +3045,159 @@ void SwiftLangSupport::collectVariableTypes(
 
   auto Collector = std::make_shared<VariableTypeCollectorASTConsumer>(
       Receiver, InputBufferName, Offset, Length, FullyQualified);
+  /// FIXME: When request cancellation is implemented and Xcode adopts it,
+  /// don't use 'OncePerASTToken'.
+  static const char OncePerASTToken = 0;
+  const void *Once = CancelOnSubsequentRequest ? &OncePerASTToken : nullptr;
+  getASTManager()->processASTAsync(Invok, std::move(Collector), Once,
+                                   CancellationToken,
+                                   llvm::vfs::createPhysicalFileSystem());
+}
+
+void SwiftLangSupport::collectDeclarationUSRs(
+    StringRef FilePath, ArrayRef<const char *> Args,
+    std::optional<unsigned> Offset, std::optional<unsigned> Length,
+    bool CancelOnSubsequentRequest,
+    SourceKitCancellationToken CancellationToken,
+    std::function<void(const RequestResult<DeclarationUSRsInFile> &)>
+        Receiver) {
+  std::string Error;
+  SwiftInvocationRef Invok =
+      ASTMgr->getTypecheckInvocation(Args, FilePath, Error);
+  if (!Invok) {
+    LOG_WARN_FUNC("failed to create an ASTInvocation: " << Error);
+    Receiver(RequestResult<DeclarationUSRsInFile>::fromError(Error));
+    return;
+  }
+  assert(Invok);
+
+  class DeclarationUSRCollectorASTConsumer : public SwiftASTConsumer {
+  private:
+    class DeclarationUSRCollector : public SourceEntityWalker {
+    private:
+      SourceManager &SM;
+      unsigned BufferID;
+      SourceRange TotalRange;
+      std::vector<DeclarationUSR> &Results;
+
+      bool overlapsTotalRange(SourceRange Range) {
+        return TotalRange.isInvalid() || Range.overlaps(TotalRange);
+      }
+
+      bool overlapsTotalRange(CharSourceRange Range) const {
+        if (TotalRange.isInvalid())
+          return true;
+
+        unsigned TotalStart =
+            SM.getLocOffsetInBuffer(TotalRange.Start, BufferID);
+        unsigned TotalEnd = SM.getLocOffsetInBuffer(TotalRange.End, BufferID);
+        unsigned Start = SM.getLocOffsetInBuffer(Range.getStart(), BufferID);
+        unsigned End = Start + Range.getByteLength();
+        return Start < TotalEnd && TotalStart < End;
+      }
+
+      bool isFromMainBuffer(Decl *D) const {
+        return SM.getRangeForBuffer(BufferID).contains(D->getStartLoc());
+      }
+
+    public:
+      DeclarationUSRCollector(SourceManager &SM, unsigned BufferID,
+                              SourceRange Range,
+                              std::vector<DeclarationUSR> &Results)
+          : SM(SM), BufferID(BufferID), TotalRange(Range), Results(Results) {}
+
+      bool walkToDeclPre(Decl *D, CharSourceRange DeclNameRange) override {
+        if (DeclNameRange.isInvalid())
+          return true;
+
+        if (!isFromMainBuffer(D))
+          return false;
+
+        if (!overlapsTotalRange(D->getSourceRange()))
+          return false;
+
+        if (!overlapsTotalRange(DeclNameRange))
+          return true;
+
+        UIdent Kind = SwiftLangSupport::getUIDForDecl(D);
+        if (Kind.isInvalid())
+          return true;
+
+        std::string USR;
+        llvm::raw_string_ostream OS(USR);
+        if (ide::printDeclUSR(D, OS))
+          return true;
+
+        Results.push_back({SM.getLocOffsetInBuffer(DeclNameRange.getStart(),
+                                                   BufferID),
+                           DeclNameRange.getByteLength(), Kind, OS.str()});
+        return true;
+      }
+
+      bool walkToStmtPre(Stmt *S) override {
+        return overlapsTotalRange(S->getSourceRange());
+      }
+
+      bool walkToExprPre(Expr *E) override {
+        return overlapsTotalRange(E->getSourceRange());
+      }
+
+      bool walkToPatternPre(Pattern *P) override {
+        return overlapsTotalRange(P->getSourceRange());
+      }
+    };
+
+    std::function<void(const RequestResult<DeclarationUSRsInFile> &)> Receiver;
+    std::string InputFile;
+    std::optional<unsigned> Offset;
+    std::optional<unsigned> Length;
+
+  public:
+    DeclarationUSRCollectorASTConsumer(
+        std::function<void(const RequestResult<DeclarationUSRsInFile> &)>
+            Receiver,
+        StringRef InputFile, std::optional<unsigned> Offset,
+        std::optional<unsigned> Length)
+        : Receiver(std::move(Receiver)), InputFile(InputFile), Offset(Offset),
+          Length(Length) {}
+
+    void handlePrimaryAST(ASTUnitRef AstUnit) override {
+      auto &CompInst = AstUnit->getCompilerInstance();
+      SourceFile *SF = retrieveInputFile(InputFile, CompInst);
+      if (!SF) {
+        Receiver(RequestResult<DeclarationUSRsInFile>::fromError(
+            "Unable to find input file"));
+        return;
+      }
+
+      SourceRange Range;
+      if (Offset.has_value() && Length.has_value()) {
+        auto &SM = CompInst.getSourceMgr();
+        unsigned BufferID = SF->getBufferID();
+        SourceLoc Start = Lexer::getLocForStartOfToken(SM, BufferID, *Offset);
+        SourceLoc End =
+            Lexer::getLocForStartOfToken(SM, BufferID, *Offset + *Length);
+        Range = SourceRange(Start, End);
+      }
+
+      DeclarationUSRsInFile Result;
+      DeclarationUSRCollector Walker(
+          CompInst.getSourceMgr(), SF->getBufferID(), Range, Result.Results);
+      Walker.walk(*SF);
+      Receiver(RequestResult<DeclarationUSRsInFile>::fromResult(Result));
+    }
+
+    void cancelled() override {
+      Receiver(RequestResult<DeclarationUSRsInFile>::cancelled());
+    }
+
+    void failed(StringRef Error) override {
+      Receiver(RequestResult<DeclarationUSRsInFile>::fromError(Error));
+    }
+  };
+
+  auto Collector = std::make_shared<DeclarationUSRCollectorASTConsumer>(
+      std::move(Receiver), FilePath, Offset, Length);
   /// FIXME: When request cancellation is implemented and Xcode adopts it,
   /// don't use 'OncePerASTToken'.
   static const char OncePerASTToken = 0;

@@ -73,6 +73,9 @@ static void printExpressionType(sourcekitd_variant_t Info, llvm::raw_ostream &OS
 static void printVariableType(sourcekitd_variant_t Info,
                               llvm::MemoryBuffer *SourceBuf,
                               llvm::raw_ostream &OS);
+static void printDeclarationUSR(sourcekitd_variant_t Info,
+                                llvm::MemoryBuffer *SourceBuf,
+                                llvm::raw_ostream &OS);
 static void printDocInfo(sourcekitd_variant_t Info, StringRef Filename);
 static void printInterfaceGen(sourcekitd_variant_t Info, bool CheckASCII);
 static void printSemanticInfo();
@@ -905,6 +908,19 @@ static int handleTestInvocation(TestOptions Opts, TestOptions &InitOpts) {
     break;
   }
 
+  case SourceKitRequest::CollectDeclarationUSR: {
+    sourcekitd_request_dictionary_set_uid(Req, KeyRequest,
+                                          RequestCollectDeclarationUSR);
+    sourcekitd_request_dictionary_set_string(Req, KeyFilePath,
+                                             Opts.SourceFile.c_str());
+    if (Opts.Length) {
+      sourcekitd_request_dictionary_set_int64(Req, KeyOffset, ByteOffset);
+      sourcekitd_request_dictionary_set_int64(Req, KeyLength, Opts.Length);
+    }
+    addRequestOptionsDirect(Req, Opts);
+    break;
+  }
+
 #define SEMANTIC_REFACTORING(KIND, NAME, ID)                                   \
   case SourceKitRequest::KIND:                                                 \
     setRefactoringFields(Req, Opts, KindRefactoring##KIND, SourceBuf.get());   \
@@ -1502,6 +1518,10 @@ static bool handleResponse(sourcekitd_response_t Resp, const TestOptions &Opts,
 
     case SourceKitRequest::CollectVariableType:
       printVariableType(Info, SourceBuf.get(), llvm::outs());
+      break;
+
+    case SourceKitRequest::CollectDeclarationUSR:
+      printDeclarationUSR(Info, SourceBuf.get(), llvm::outs());
       break;
 
     case SourceKitRequest::DocInfo:
@@ -2243,6 +2263,36 @@ static void printVariableType(sourcekitd_variant_t Info,
        << " (explicit type: " << HasExplicitType << ")\n";
   }
   OS << "</VariableTypes>\n";
+}
+
+static void printDeclarationUSR(sourcekitd_variant_t Info,
+                                llvm::MemoryBuffer *SourceBuf,
+                                llvm::raw_ostream &OS) {
+  auto Decls = sourcekitd_variant_dictionary_get_value(Info, KeyDeclarations);
+  unsigned Count = sourcekitd_variant_array_get_count(Decls);
+  if (!Count) {
+    OS << "cannot find declaration USRs in the file\n";
+    return;
+  }
+  OS << "<DeclarationUSRs>\n";
+  for (unsigned i = 0; i != Count; ++i) {
+    sourcekitd_variant_t Item = sourcekitd_variant_array_get_value(Decls, i);
+    unsigned Offset = sourcekitd_variant_dictionary_get_int64(Item, KeyOffset);
+    unsigned Length = sourcekitd_variant_dictionary_get_int64(Item, KeyLength);
+    auto Start = resolveToLineCol(Offset, SourceBuf);
+    auto End = resolveToLineCol(Offset + Length, SourceBuf);
+    auto Kind = sourcekitd_variant_dictionary_get_uid(Item, KeyKind);
+    auto USR = sourcekitd_variant_dictionary_get_string(Item, KeyUSR);
+    OS << "("
+       << Start.first << ":" << Start.second
+       << ", "
+       << End.first << ":" << End.second
+       << "): "
+       << sourcekitd_uid_get_string_ptr(Kind)
+       << " "
+       << USR << "\n";
+  }
+  OS << "</DeclarationUSRs>\n";
 }
 
 static void printFoundInterface(sourcekitd_variant_t Info,
